@@ -1,0 +1,15 @@
+{
+  "name": "@linkora/protocol",
+  "version": "1.0.0",
+  "description": "Shared message specification, binary framing, and crypto types for Linkora",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "test": "npx tsc && node --test test/protocol.test.js"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.0"
+  }
+}

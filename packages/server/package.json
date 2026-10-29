@@ -1,0 +1,21 @@
+{
+  "name": "@linkora/server",
+  "version": "1.0.0",
+  "description": "Optional zero-knowledge end-to-end encrypted WebSocket relay and device registry for Linkora",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsc -w",
+    "test": "node --test test/*.test.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.0",
+    "@types/ws": "^8.5.14",
+    "typescript": "^5.8.0"
+  }
+}

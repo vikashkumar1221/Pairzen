@@ -1,0 +1,32 @@
+{
+  "name": "linkora-ecosystem",
+  "version": "1.0.0",
+  "description": "Production-oriented cross-platform Apple Continuity alternative for macOS, Android, and iOS",
+  "private": true,
+  "workspaces": [
+    "packages/*",
+    "apps/web",
+    "packages/server"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "lint": "npm run lint --workspaces --if-present",
+    "web": "npm run dev --workspace=apps/web",
+    "server": "npm run dev --workspace=packages/server",
+    "test:macos": "cd apps/macos && swift test",
+    "build:macos": "cd apps/macos && swift build"
+  },
+  "keywords": [
+    "continuity",
+    "macos",
+    "android",
+    "ios",
+    "device-ecosystem",
+    "file-sharing",
+    "clipboard",
+    "remote-control"
+  ],
+  "author": "Linkora Team",
+  "license": "MIT"
+}
