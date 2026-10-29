@@ -12,6 +12,10 @@ interface ClientSession {
 
 export function createRelayServer() {
   const activeSessions = new Map<string, ClientSession>();
+  const activeSockets = new Set<WebSocket>();
+  let isMacLocked = false;
+  let isPhonePaired = false;
+  let pairedDeviceName = "Mobile Phone";
 
   const server = http.createServer((req, res) => {
     // Health check endpoint
@@ -21,7 +25,9 @@ export function createRelayServer() {
         JSON.stringify({
           status: "healthy",
           uptimeSeconds: process.uptime(),
-          connectedClients: activeSessions.size,
+          connectedClients: activeSockets.size,
+          isMacLocked,
+          isPhonePaired,
           timestamp: new Date().toISOString()
         })
       );
@@ -47,7 +53,21 @@ export function createRelayServer() {
   const wss = new WebSocketServer({ server });
 
   wss.on("connection", (ws: WebSocket) => {
-    let authenticatedDeviceId: string | null = null;
+    activeSockets.add(ws);
+    let authenticatedDeviceId: string = "client-" + Math.random().toString(36).slice(2, 9);
+
+    // Send current ecosystem state immediately on connection
+    ws.send(
+      JSON.stringify({
+        type: "relayed_envelope",
+        payload: {
+          action: "sync_state",
+          isMacLocked,
+          isPhonePaired,
+          deviceName: pairedDeviceName
+        }
+      })
+    );
 
     ws.on("message", (rawMessage: Buffer) => {
       try {
@@ -56,30 +76,39 @@ export function createRelayServer() {
         switch (message.type) {
           case "register": {
             const { deviceId, publicKeyHex } = message;
-            if (!deviceId) {
-              ws.send(JSON.stringify({ type: "error", error: "Missing deviceId" }));
-              return;
+            if (deviceId) {
+              authenticatedDeviceId = deviceId;
             }
-            authenticatedDeviceId = deviceId;
-            activeSessions.set(deviceId, {
+            activeSessions.set(authenticatedDeviceId, {
               ws,
-              deviceId,
+              deviceId: authenticatedDeviceId,
               publicKeyHex,
               connectedAt: Date.now()
             });
-            ws.send(JSON.stringify({ type: "registered", deviceId, ok: true }));
+            ws.send(JSON.stringify({ type: "registered", deviceId: authenticatedDeviceId, ok: true }));
             break;
           }
 
           case "broadcast": {
-            // Broadcast payload to all other connected devices
-            for (const [id, session] of activeSessions.entries()) {
-              if (session.ws !== ws && session.ws.readyState === WebSocket.OPEN) {
-                session.ws.send(
+            const payload = message.payload || {};
+            // Intercept lock/unlock actions to keep server state authoritative
+            if (payload.action === "lock_mac") {
+              isMacLocked = true;
+            } else if (payload.action === "unlock_mac") {
+              isMacLocked = false;
+            } else if (payload.action === "phone_connected") {
+              isPhonePaired = true;
+              if (payload.deviceName) pairedDeviceName = payload.deviceName;
+            }
+
+            // Broadcast payload to all other connected sockets
+            for (const socket of activeSockets) {
+              if (socket !== ws && socket.readyState === WebSocket.OPEN) {
+                socket.send(
                   JSON.stringify({
                     type: "relayed_envelope",
-                    fromDeviceId: authenticatedDeviceId || "peer",
-                    payload: message.payload
+                    fromDeviceId: authenticatedDeviceId,
+                    payload
                   })
                 );
               }
@@ -89,29 +118,29 @@ export function createRelayServer() {
 
           case "relay": {
             const { toDeviceId, payload } = message;
-            if (!authenticatedDeviceId) {
-              ws.send(JSON.stringify({ type: "error", error: "Not registered" }));
-              return;
-            }
             const target = activeSessions.get(toDeviceId);
-            if (!target || target.ws.readyState !== WebSocket.OPEN) {
-              ws.send(
+            if (target && target.ws.readyState === WebSocket.OPEN) {
+              target.ws.send(
                 JSON.stringify({
-                  type: "relay_failed",
-                  toDeviceId,
-                  reason: "Destination device offline"
+                  type: "relayed_envelope",
+                  fromDeviceId: authenticatedDeviceId,
+                  payload
                 })
               );
-              return;
+            } else {
+              // Fallback: broadcast if target session not strictly mapped
+              for (const socket of activeSockets) {
+                if (socket !== ws && socket.readyState === WebSocket.OPEN) {
+                  socket.send(
+                    JSON.stringify({
+                      type: "relayed_envelope",
+                      fromDeviceId: authenticatedDeviceId,
+                      payload
+                    })
+                  );
+                }
+              }
             }
-
-            target.ws.send(
-              JSON.stringify({
-                type: "relayed_envelope",
-                fromDeviceId: authenticatedDeviceId,
-                payload
-              })
-            );
             break;
           }
 
@@ -129,9 +158,8 @@ export function createRelayServer() {
     });
 
     ws.on("close", () => {
-      if (authenticatedDeviceId) {
-        activeSessions.delete(authenticatedDeviceId);
-      }
+      activeSockets.delete(ws);
+      activeSessions.delete(authenticatedDeviceId);
     });
   });
 

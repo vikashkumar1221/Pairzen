@@ -64,6 +64,10 @@ export default function App() {
   const [lockTime, setLockTime] = useState("");
   const [unlockStatusMessage, setUnlockStatusMessage] = useState("");
 
+  // Fingerprint Biometric Modal State
+  const [showFingerprintModal, setShowFingerprintModal] = useState(false);
+  const [fingerprintModalType, setFingerprintModalType] = useState<"lock" | "unlock">("unlock");
+
   // Trackpad cursor position
   const [cursorPos, setCursorPos] = useState({ x: 220, y: 130 });
   const [lastTrackpadAction, setLastTrackpadAction] = useState("");
@@ -177,7 +181,23 @@ export default function App() {
         if (msg.type === "relayed_envelope") {
           const payload = msg.payload;
 
-          if (payload.action === "phone_connected") {
+          if (payload.action === "sync_state") {
+            if (typeof payload.isMacLocked === "boolean") {
+              setIsMacLocked(payload.isMacLocked);
+              if (payload.isMacLocked) {
+                setFingerprintModalType("unlock");
+              }
+            }
+            if (typeof payload.isPhonePaired === "boolean" && payload.isPhonePaired) {
+              setIsPhoneConnected(true);
+              if (payload.deviceName) setConnectedDeviceName(payload.deviceName);
+            }
+          } else if (payload.action === "request_phone_fingerprint") {
+            // Mac requested phone to prompt fingerprint!
+            setShowFingerprintModal(true);
+            setFingerprintModalType(payload.intent === "lock" ? "lock" : "unlock");
+            if (navigator.vibrate) navigator.vibrate([80, 50, 80]);
+          } else if (payload.action === "phone_connected") {
             setIsPhoneConnected(true);
             setConnectedDeviceName(payload.deviceName || "Mobile Phone");
             setConnectionTime(new Date().toLocaleTimeString());
@@ -197,16 +217,17 @@ export default function App() {
               ...prev
             ]);
           } else if (payload.action === "lock_mac") {
-            // PHONE ORDERED MAC TO LOCK!
+            // PHONE OR MAC ORDERED LOCK
             setIsMacLocked(true);
             setLockTime(new Date().toLocaleTimeString());
             setUnlockStatusMessage("MacBook locked remotely by phone.");
+            setFingerprintModalType("unlock");
             if (navigator.vibrate) navigator.vibrate([100]);
             setActivities((prev) => [
               {
                 id: `a-${Date.now()}`,
-                title: "MacBook Locked Remotely",
-                details: "Screen lock requested by paired phone",
+                title: "MacBook Screen Locked",
+                details: "Lock state synchronized across devices",
                 icon: "shield",
                 timestamp: new Date().toLocaleTimeString(),
                 isSimulated: false
@@ -217,6 +238,7 @@ export default function App() {
             // PHONE FINGERPRINT UNLOCKED MAC!
             setIsMacLocked(false);
             setUnlockStatusMessage("Unlocked via Phone Fingerprint!");
+            setShowFingerprintModal(false);
             if (navigator.vibrate) navigator.vibrate([50, 50, 100]);
             setActivities((prev) => [
               {
@@ -389,36 +411,63 @@ export default function App() {
               )}
             </div>
 
-            <div className="p-4 rounded-2xl bg-neutral-900/80 border border-neutral-800 space-y-2 shadow-xl">
-              <Fingerprint className="h-8 w-8 text-emerald-400 mx-auto animate-pulse" />
-              <p className="text-xs font-semibold text-neutral-200">
+            <div
+              onClick={() => {
+                broadcastMessage({ action: "request_phone_fingerprint", intent: "unlock" });
+                setUnlockStatusMessage("Biometric prompt sent to your phone! Touch sensor on phone.");
+              }}
+              className="p-5 rounded-2xl bg-neutral-900/90 hover:bg-neutral-850 border border-neutral-800 space-y-2.5 shadow-2xl cursor-pointer transition active:scale-98 group"
+            >
+              <div className="h-14 w-14 mx-auto rounded-full bg-emerald-500/10 group-hover:bg-emerald-500/20 border border-emerald-500/30 flex items-center justify-center transition">
+                <Fingerprint className="h-8 w-8 text-emerald-400 animate-pulse" />
+              </div>
+              <p className="text-sm font-bold text-white">
                 Touch Fingerprint on your phone to Unlock
               </p>
-              <p className="text-[11px] text-neutral-400">
-                Your paired {connectedDeviceName} holds the cryptographic identity key.
+              <p className="text-xs text-neutral-400">
+                Paired {connectedDeviceName} holds the cryptographic identity key.
               </p>
+              <span className="inline-block text-[11px] text-emerald-300 bg-emerald-500/15 px-3 py-1 rounded-full border border-emerald-500/30 font-medium">
+                📱 Click to send prompt to Phone
+              </span>
             </div>
 
-            {/* Manual Unlock Override Button for testing */}
-            <button
-              onClick={() => {
-                setIsMacLocked(false);
-                setActivities((prev) => [
-                  {
-                    id: `a-${Date.now()}`,
-                    title: "MacBook Unlocked Manually",
-                    details: "Screen lock dismissed by user",
-                    icon: "shield",
-                    timestamp: new Date().toLocaleTimeString(),
-                    isSimulated: false
-                  },
-                  ...prev
-                ]);
-              }}
-              className="px-4 py-2 rounded-xl bg-neutral-800/80 hover:bg-neutral-800 text-neutral-400 hover:text-white text-xs transition"
-            >
-              Manual Password Unlock Override
-            </button>
+            {/* Prompt Phone vs Direct Unlock Action Buttons */}
+            <div className="w-full flex items-center space-x-2">
+              <button
+                onClick={() => {
+                  broadcastMessage({ action: "request_phone_fingerprint", intent: "unlock" });
+                  setUnlockStatusMessage("Sent unlock prompt to phone!");
+                }}
+                className="flex-1 py-2 px-3 rounded-xl bg-blue-600/20 hover:bg-blue-600/30 text-blue-300 border border-blue-500/30 text-xs font-semibold transition flex items-center justify-center space-x-1.5"
+              >
+                <Smartphone className="h-3.5 w-3.5 text-blue-400" />
+                <span>Prompt Phone</span>
+              </button>
+
+              <button
+                onClick={() => {
+                  broadcastMessage({ action: "unlock_mac" });
+                  setIsMacLocked(false);
+                  setShowFingerprintModal(false);
+                  setActivities((prev) => [
+                    {
+                      id: `a-${Date.now()}`,
+                      title: "MacBook Unlocked Manually",
+                      details: "Screen lock dismissed by user",
+                      icon: "shield",
+                      timestamp: new Date().toLocaleTimeString(),
+                      isSimulated: false
+                    },
+                    ...prev
+                  ]);
+                }}
+                className="flex-1 py-2 px-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold transition flex items-center justify-center space-x-1.5 shadow"
+              >
+                <Unlock className="h-3.5 w-3.5" />
+                <span>Direct Unlock</span>
+              </button>
+            </div>
           </div>
 
           <div className="text-[11px] text-neutral-500 font-mono">
@@ -486,6 +535,39 @@ export default function App() {
           >
             {isDarkMode ? "🌙" : "☀️"}
           </button>
+
+          {/* MAC HEADER QUICK LOCK/UNLOCK BUTTON */}
+          {viewMode !== "phone" && (
+            isMacLocked ? (
+              <button
+                onClick={() => {
+                  broadcastMessage({ action: "request_phone_fingerprint", intent: "unlock" });
+                  setShowFingerprintModal(true);
+                  setFingerprintModalType("unlock");
+                  setUnlockStatusMessage("Unlock request sent to phone! Touch sensor on phone.");
+                }}
+                className="flex items-center space-x-1.5 px-3 py-1 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold rounded-lg shadow transition animate-pulse"
+                title="Send Unlock Request to Phone"
+              >
+                <Unlock className="h-3.5 w-3.5" />
+                <span>Unlock via Phone</span>
+              </button>
+            ) : (
+              <button
+                onClick={() => {
+                  broadcastMessage({ action: "request_phone_fingerprint", intent: "lock" });
+                  setShowFingerprintModal(true);
+                  setFingerprintModalType("lock");
+                  setUnlockStatusMessage("Lock request sent to phone! Touch fingerprint sensor on phone.");
+                }}
+                className="flex items-center space-x-1.5 px-3 py-1 bg-amber-600/30 hover:bg-amber-600/40 text-amber-300 border border-amber-500/40 text-xs font-semibold rounded-lg shadow transition"
+                title="Prompt Phone Fingerprint to Lock Mac"
+              >
+                <Lock className="h-3.5 w-3.5 text-amber-400" />
+                <span>Lock Mac</span>
+              </button>
+            )
+          )}
 
           {viewMode !== "phone" && (
             <button
@@ -855,17 +937,9 @@ export default function App() {
               {/* QUICK LOCK / UNLOCK MAC BUTTON */}
               <button
                 onClick={() => {
-                  if (isMacLocked) {
-                    broadcastMessage({ action: "unlock_mac" });
-                    setIsMacLocked(false);
-                    if (navigator.vibrate) navigator.vibrate([50, 50, 100]);
-                    alert("MacBook Unlocked via Phone Fingerprint! 🎉");
-                  } else {
-                    broadcastMessage({ action: "lock_mac" });
-                    setIsMacLocked(true);
-                    if (navigator.vibrate) navigator.vibrate([100]);
-                    alert("MacBook Screen is now Locked! 🔒");
-                  }
+                  setShowFingerprintModal(true);
+                  setFingerprintModalType(isMacLocked ? "unlock" : "lock");
+                  if (navigator.vibrate) navigator.vibrate([40]);
                 }}
                 className={`px-3 py-1.5 rounded-xl text-xs font-bold flex items-center space-x-1.5 transition ${
                   isMacLocked
@@ -1056,23 +1130,38 @@ export default function App() {
                   </div>
 
                   {/* Fingerprint Interactive Unlock Box */}
-                  <div className="p-5 rounded-3xl bg-neutral-900 border border-neutral-800 space-y-4 text-center">
+                  <div className="p-6 rounded-3xl bg-neutral-900 border border-neutral-800 space-y-4 text-center">
                     <div
                       onClick={() => {
-                        broadcastMessage({ action: "unlock_mac" });
-                        setIsMacLocked(false);
-                        if (navigator.vibrate) navigator.vibrate([60, 40, 80]);
-                        alert("Fingerprint Approved! MacBook Unlocked 🎉");
+                        if (isMacLocked) {
+                          broadcastMessage({ action: "unlock_mac" });
+                          setIsMacLocked(false);
+                          setShowFingerprintModal(false);
+                          if (navigator.vibrate) navigator.vibrate([60, 40, 80]);
+                        } else {
+                          broadcastMessage({ action: "lock_mac" });
+                          setIsMacLocked(true);
+                          setFingerprintModalType("unlock");
+                          if (navigator.vibrate) navigator.vibrate([100]);
+                        }
                       }}
-                      className="h-20 w-20 mx-auto rounded-full bg-emerald-500/10 border-2 border-emerald-500/40 flex items-center justify-center text-emerald-400 cursor-pointer active:scale-95 transition shadow-lg shadow-emerald-500/10"
+                      className={`h-24 w-24 mx-auto rounded-full flex items-center justify-center cursor-pointer active:scale-95 transition shadow-2xl ${
+                        isMacLocked
+                          ? "bg-emerald-500/15 border-2 border-emerald-500 text-emerald-400 shadow-emerald-500/20"
+                          : "bg-amber-500/15 border-2 border-amber-500 text-amber-400 shadow-amber-500/20"
+                      }`}
                     >
-                      <Fingerprint className="h-10 w-10 animate-pulse" />
+                      <Fingerprint className="h-12 w-12 animate-pulse" />
                     </div>
 
                     <div>
-                      <p className="font-bold text-sm text-white">Touch Fingerprint to Unlock Mac</p>
-                      <p className="text-[11px] text-neutral-400">
-                        {isMacLocked ? "Mac is currently LOCKED 🔒" : "Mac is UNLOCKED 🟢"}
+                      <p className="font-extrabold text-base text-white">
+                        {isMacLocked ? "Touch to UNLOCK MacBook" : "Touch to LOCK MacBook"}
+                      </p>
+                      <p className="text-xs text-neutral-400 pt-1">
+                        {isMacLocked
+                          ? "MacBook screen is locked. Touch sensor to authenticate."
+                          : "Touch fingerprint sensor to turn off & lock Mac screen."}
                       </p>
                     </div>
 
@@ -1081,11 +1170,16 @@ export default function App() {
                         onClick={() => {
                           broadcastMessage({ action: "lock_mac" });
                           setIsMacLocked(true);
+                          setFingerprintModalType("unlock");
                           if (navigator.vibrate) navigator.vibrate([100]);
                         }}
-                        className="py-2.5 rounded-xl bg-amber-600/20 hover:bg-amber-600/30 text-amber-300 font-bold text-xs border border-amber-500/30 transition flex items-center justify-center space-x-1"
+                        className={`py-3 rounded-2xl font-bold text-xs border transition flex items-center justify-center space-x-1.5 ${
+                          !isMacLocked
+                            ? "bg-amber-600/30 text-amber-300 border-amber-500/40"
+                            : "bg-neutral-800 text-neutral-400 border-neutral-700"
+                        }`}
                       >
-                        <Lock className="h-3.5 w-3.5" />
+                        <Lock className="h-4 w-4" />
                         <span>Lock Mac</span>
                       </button>
 
@@ -1093,11 +1187,16 @@ export default function App() {
                         onClick={() => {
                           broadcastMessage({ action: "unlock_mac" });
                           setIsMacLocked(false);
+                          setShowFingerprintModal(false);
                           if (navigator.vibrate) navigator.vibrate([60, 40, 80]);
                         }}
-                        className="py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs shadow transition flex items-center justify-center space-x-1"
+                        className={`py-3 rounded-2xl font-bold text-xs shadow transition flex items-center justify-center space-x-1.5 ${
+                          isMacLocked
+                            ? "bg-emerald-600 hover:bg-emerald-500 text-white shadow-emerald-600/30 animate-pulse"
+                            : "bg-neutral-800 text-neutral-400 border border-neutral-700"
+                        }`}
                       >
-                        <Unlock className="h-3.5 w-3.5" />
+                        <Unlock className="h-4 w-4" />
                         <span>Unlock Mac</span>
                       </button>
                     </div>
@@ -1273,6 +1372,119 @@ export default function App() {
             >
               Simulate Instant Connection
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================================= */}
+      {/* BIOMETRIC FINGERPRINT POPUP MODAL (ON PHONE & SIMULATOR)                   */}
+      {/* ========================================================================= */}
+      {showFingerprintModal && (
+        <div className="fixed inset-0 z-50 bg-black/85 backdrop-blur-md flex items-end sm:items-center justify-center p-4 select-none animate-in fade-in duration-200">
+          <div className="w-full max-w-sm bg-neutral-900 border border-neutral-700/80 rounded-3xl p-6 shadow-2xl space-y-5 text-center transform transition-all animate-in slide-in-from-bottom-6">
+            {/* Top Indicator */}
+            <div className="w-12 h-1 bg-neutral-700 rounded-full mx-auto" />
+
+            <div className="flex items-center justify-between text-xs text-neutral-400">
+              <span className="flex items-center space-x-1.5 font-medium">
+                <ShieldCheck className="h-4 w-4 text-emerald-400" />
+                <span>Pairzen Biometric Security</span>
+              </span>
+              <button
+                onClick={() => setShowFingerprintModal(false)}
+                className="p-1 rounded-full text-neutral-400 hover:text-white hover:bg-neutral-800 transition"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            {/* Pulsing Interactive Fingerprint Sensor Button */}
+            <div className="py-2">
+              <button
+                type="button"
+                onClick={() => {
+                  if (fingerprintModalType === "lock") {
+                    // Tap to LOCK Mac
+                    if (navigator.vibrate) navigator.vibrate([100]);
+                    broadcastMessage({ action: "lock_mac" });
+                    setIsMacLocked(true);
+                    setFingerprintModalType("unlock");
+                    setUnlockStatusMessage("MacBook locked remotely by phone.");
+                  } else {
+                    // Tap to UNLOCK Mac
+                    if (navigator.vibrate) navigator.vibrate([60, 40, 80]);
+                    broadcastMessage({ action: "unlock_mac" });
+                    setIsMacLocked(false);
+                    setShowFingerprintModal(false);
+                    setUnlockStatusMessage("Unlocked via Phone Fingerprint!");
+                  }
+                }}
+                className={`h-28 w-28 mx-auto rounded-full flex flex-col items-center justify-center cursor-pointer active:scale-90 transition-all duration-200 shadow-2xl outline-none ${
+                  fingerprintModalType === "lock"
+                    ? "bg-amber-500/20 border-2 border-amber-500 text-amber-400 shadow-amber-500/30 hover:bg-amber-500/30 animate-pulse"
+                    : "bg-emerald-500/20 border-2 border-emerald-500 text-emerald-400 shadow-emerald-500/30 hover:bg-emerald-500/30 animate-pulse"
+                }`}
+                title={fingerprintModalType === "lock" ? "Click to Lock Mac" : "Click to Unlock Mac"}
+              >
+                <Fingerprint className="h-14 w-14" />
+              </button>
+            </div>
+
+            <div className="space-y-1.5">
+              <h3 className="font-extrabold text-lg text-white">
+                {fingerprintModalType === "lock"
+                  ? "Touch Fingerprint to Lock Mac"
+                  : "Touch Fingerprint to Unlock Mac"}
+              </h3>
+              <p className="text-xs text-neutral-300 max-w-xs mx-auto">
+                {fingerprintModalType === "lock"
+                  ? "Touch the fingerprint sensor above to securely shut off and lock Vikash's MacBook Pro."
+                  : "Touch the fingerprint sensor above to authenticate with your phone and unlock your Mac."}
+              </p>
+            </div>
+
+            <div className="pt-2 flex items-center justify-between gap-3">
+              <button
+                onClick={() => setShowFingerprintModal(false)}
+                className="flex-1 py-2.5 rounded-xl bg-neutral-800 hover:bg-neutral-700 text-neutral-300 text-xs font-semibold transition"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => {
+                  if (fingerprintModalType === "lock") {
+                    if (navigator.vibrate) navigator.vibrate([100]);
+                    broadcastMessage({ action: "lock_mac" });
+                    setIsMacLocked(true);
+                    setFingerprintModalType("unlock");
+                    setUnlockStatusMessage("MacBook locked remotely by phone.");
+                  } else {
+                    if (navigator.vibrate) navigator.vibrate([60, 40, 80]);
+                    broadcastMessage({ action: "unlock_mac" });
+                    setIsMacLocked(false);
+                    setShowFingerprintModal(false);
+                    setUnlockStatusMessage("Unlocked via Phone Fingerprint!");
+                  }
+                }}
+                className={`flex-1 py-2.5 rounded-xl font-bold text-xs text-white shadow-lg transition flex items-center justify-center space-x-1.5 ${
+                  fingerprintModalType === "lock"
+                    ? "bg-amber-600 hover:bg-amber-500 shadow-amber-600/30"
+                    : "bg-emerald-600 hover:bg-emerald-500 shadow-emerald-600/30"
+                }`}
+              >
+                {fingerprintModalType === "lock" ? (
+                  <>
+                    <Lock className="h-3.5 w-3.5" />
+                    <span>Lock Now</span>
+                  </>
+                ) : (
+                  <>
+                    <Unlock className="h-3.5 w-3.5" />
+                    <span>Unlock Now</span>
+                  </>
+                )}
+              </button>
+            </div>
           </div>
         </div>
       )}
