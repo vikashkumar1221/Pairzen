@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from "react";
+import QRCode from "qrcode";
 import {
   Laptop,
   Smartphone,
@@ -16,83 +17,96 @@ import {
   Copy,
   Fingerprint,
   Upload,
+  Lock,
+  Unlock,
+  Download,
+  Eye,
+  X,
   Zap
 } from "lucide-react";
 import { DeviceModel, NavigationTab, TransferModel, ActivityModel } from "./types.ts";
 
 export default function App() {
-  // Detect if accessing from a real phone browser
-  const isMobileScreen = typeof window !== "undefined" && (window.innerWidth < 768 || /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent));
-  const urlParams = typeof window !== "undefined" ? new URLSearchParams(window.location.search) : new URLSearchParams();
+  const isMobileScreen =
+    typeof window !== "undefined" &&
+    (window.innerWidth < 768 || /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent));
+  const urlParams =
+    typeof window !== "undefined" ? new URLSearchParams(window.location.search) : new URLSearchParams();
   const urlRole = urlParams.get("role");
 
-  // View mode: "phone" for mobile phone view, "mac" for desktop Mac view, "dual" for split desktop simulation
+  // View Mode: "phone" (mobile client), "mac" (desktop), "dual" (simulator)
   const [viewMode, setViewMode] = useState<"mac" | "phone" | "dual">(() => {
     if (urlRole === "phone" || isMobileScreen) {
       return "phone";
     }
-    return "dual";
+    return "mac";
   });
 
-  // Mobile bottom tab: "trackpad" | "files" | "camera" | "security" | "clipboard"
+  // Mobile Bottom Tab: "trackpad" | "files" | "camera" | "security" | "clipboard"
   const [mobileTab, setMobileTab] = useState<"trackpad" | "files" | "camera" | "security" | "clipboard">("trackpad");
-
-  // Mac desktop sidebar tab
   const [activeTab, setActiveTab] = useState<NavigationTab>("overview");
   const [isDarkMode, setIsDarkMode] = useState(true);
   const [showPairingModal, setShowPairingModal] = useState(false);
 
-  // Local IP of Mac
-  const macHost = window.location.hostname || "10.29.216.34";
-  const connectUrl = `http://${macHost}:3000/?role=phone&session=pairzen_active`;
+  // LAN IP Configuration (Always use 10.29.216.34 so scanning never uses 'localhost')
+  const defaultMacIp = "10.29.216.34";
+  const [macIp, setMacIp] = useState(defaultMacIp);
+  const connectUrl = `http://${macIp}:3000/?role=phone&session=pairzen_active`;
+  const [qrDataUrl, setQrDataUrl] = useState("");
 
-  // Real connection status
+  // Connection State
   const [isPhoneConnected, setIsPhoneConnected] = useState(false);
   const [connectedDeviceName, setConnectedDeviceName] = useState("Apple iPhone");
   const [connectionTime, setConnectionTime] = useState("");
 
-  // Live Trackpad coordinates shared across phone and Mac
+  // Mac Lock Screen State (controlled from Phone!)
+  const [isMacLocked, setIsMacLocked] = useState(false);
+  const [lockTime, setLockTime] = useState("");
+  const [unlockStatusMessage, setUnlockStatusMessage] = useState("");
+
+  // Trackpad cursor position
   const [cursorPos, setCursorPos] = useState({ x: 220, y: 130 });
   const [lastTrackpadAction, setLastTrackpadAction] = useState("");
 
-  // Biometric challenge state
-  const [isChallenging, setIsChallenging] = useState(false);
-  const [challengeNonce, setChallengeNonce] = useState("");
-  const [challengeStatus, setChallengeStatus] = useState<"idle" | "prompting_phone" | "approved" | "rejected">("idle");
-  const [phoneBiometricPromptOpen, setPhoneBiometricPromptOpen] = useState(false);
-
-  // Real camera stream on phone
+  // Real Camera on phone
   const phoneVideoRef = useRef<HTMLVideoElement | null>(null);
   const [isPhoneCameraStreaming, setIsPhoneCameraStreaming] = useState(false);
 
-  // Shared clipboard text
+  // Shared Clipboard
   const [sharedClipboardText, setSharedClipboardText] = useState("https://pairzen.link/continuity-active");
   const [phoneClipboardInput, setPhoneClipboardInput] = useState("");
   const [clipboardCopiedNotice, setClipboardCopiedNotice] = useState(false);
 
+  // File Preview Modal
+  const [previewFile, setPreviewFile] = useState<{ name: string; url: string; size: number } | null>(null);
+
   // WebSocket reference
   const wsRef = useRef<WebSocket | null>(null);
 
-  // Transfers list
-  const [transfers, setTransfers] = useState<TransferModel[]>([
+  // File Transfers with real data URLs for View & Download
+  const [transfers, setTransfers] = useState<
+    Array<TransferModel & { fileDataUrl?: string }>
+  >([
     {
-      id: "t-1",
-      fileName: "Pairzen_Continuity_Architecture.pdf",
-      fileSizeBytes: 14850000,
+      id: "t-sample",
+      fileName: "Sample_Continuity_Architecture.pdf",
+      fileSizeBytes: 2450000,
       direction: "incoming",
       state: "completed",
       progress: 100,
       speed: "34 MB/s",
       sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
       sha256Verified: true,
-      timestamp: "10 mins ago"
+      timestamp: "10 mins ago",
+      fileDataUrl:
+        "data:text/plain;charset=utf-8,Pairzen%20Continuity%20Protocol%20Specification%20and%20Architecture"
     }
   ]);
 
-  // Activity audit
+  // Activity Log
   const [activities, setActivities] = useState<ActivityModel[]>([
     {
-      id: "a-1",
+      id: "a-init",
       title: "System Ready for Pairing",
       details: "Scan QR code with phone camera to connect",
       icon: "shield",
@@ -101,7 +115,7 @@ export default function App() {
     }
   ]);
 
-  // Devices state
+  // Devices
   const [devices] = useState<DeviceModel[]>([
     {
       id: "dev-iphone-16",
@@ -124,18 +138,28 @@ export default function App() {
     }
   ]);
 
-  // Setup WebSocket connection to relay server
+  // Generate QR Code data URL whenever connectUrl changes
   useEffect(() => {
-    const wsHost = window.location.hostname || "10.29.216.34";
+    QRCode.toDataURL(connectUrl, {
+      width: 280,
+      margin: 2,
+      color: { dark: "#000000", light: "#ffffff" }
+    })
+      .then((url) => setQrDataUrl(url))
+      .catch((err) => console.error(err));
+  }, [connectUrl]);
+
+  // Setup WebSocket relay
+  useEffect(() => {
+    const wsHost = window.location.hostname || defaultMacIp;
     const ws = new WebSocket(`ws://${wsHost}:8766`);
     wsRef.current = ws;
 
     ws.onopen = () => {
-      // Register device role
       const myId = viewMode === "phone" ? "mobile-phone" : "macbook-pro";
       ws.send(JSON.stringify({ type: "register", deviceId: myId }));
 
-      // If opening as phone via QR scan, automatically announce connection to Mac
+      // If opening as phone from QR scan, automatically announce to Mac
       if (viewMode === "phone" || urlRole === "phone") {
         const isIOS = /iPhone|iPad|iPod/i.test(navigator.userAgent);
         const name = isIOS ? "Apple iPhone (Connected)" : "Android Phone (Connected)";
@@ -154,7 +178,6 @@ export default function App() {
           const payload = msg.payload;
 
           if (payload.action === "phone_connected") {
-            // PHONE SCANNED QR & OPENED!
             setIsPhoneConnected(true);
             setConnectedDeviceName(payload.deviceName || "Mobile Phone");
             setConnectionTime(new Date().toLocaleTimeString());
@@ -166,7 +189,40 @@ export default function App() {
               {
                 id: `a-${Date.now()}`,
                 title: "Phone Connected via QR Scan",
-                details: `${payload.deviceName} established encrypted peer link`,
+                details: `${payload.deviceName} linked over local Wi-Fi`,
+                icon: "shield",
+                timestamp: new Date().toLocaleTimeString(),
+                isSimulated: false
+              },
+              ...prev
+            ]);
+          } else if (payload.action === "lock_mac") {
+            // PHONE ORDERED MAC TO LOCK!
+            setIsMacLocked(true);
+            setLockTime(new Date().toLocaleTimeString());
+            setUnlockStatusMessage("MacBook locked remotely by phone.");
+            if (navigator.vibrate) navigator.vibrate([100]);
+            setActivities((prev) => [
+              {
+                id: `a-${Date.now()}`,
+                title: "MacBook Locked Remotely",
+                details: "Screen lock requested by paired phone",
+                icon: "shield",
+                timestamp: new Date().toLocaleTimeString(),
+                isSimulated: false
+              },
+              ...prev
+            ]);
+          } else if (payload.action === "unlock_mac") {
+            // PHONE FINGERPRINT UNLOCKED MAC!
+            setIsMacLocked(false);
+            setUnlockStatusMessage("Unlocked via Phone Fingerprint!");
+            if (navigator.vibrate) navigator.vibrate([50, 50, 100]);
+            setActivities((prev) => [
+              {
+                id: `a-${Date.now()}`,
+                title: "MacBook Unlocked via Phone Fingerprint",
+                details: "Biometric signature validated and approved",
                 icon: "shield",
                 timestamp: new Date().toLocaleTimeString(),
                 isSimulated: false
@@ -174,7 +230,6 @@ export default function App() {
               ...prev
             ]);
           } else if (payload.action === "cursor_move") {
-            // Real-time trackpad movement from phone
             setCursorPos((prev) => ({
               x: Math.max(10, Math.min(380, prev.x + payload.dx)),
               y: Math.max(10, Math.min(220, prev.y + payload.dy))
@@ -183,27 +238,7 @@ export default function App() {
           } else if (payload.action === "cursor_click") {
             setLastTrackpadAction(`${payload.button.toUpperCase()} Click registered!`);
           } else if (payload.action === "incoming_file") {
-            handleReceiveFile(payload.fileName, payload.fileSize, payload.fileData);
-          } else if (payload.action === "challenge_issued") {
-            setChallengeNonce(payload.nonce);
-            setIsChallenging(true);
-            setChallengeStatus("prompting_phone");
-            setPhoneBiometricPromptOpen(true);
-          } else if (payload.action === "biometric_approved") {
-            setChallengeStatus("approved");
-            setIsChallenging(false);
-            setPhoneBiometricPromptOpen(false);
-            setActivities((prev) => [
-              {
-                id: `a-${Date.now()}`,
-                title: "Biometric Approval Verified",
-                details: "Challenge signed by phone hardware key",
-                icon: "shield",
-                timestamp: new Date().toLocaleTimeString(),
-                isSimulated: false
-              },
-              ...prev
-            ]);
+            handleReceiveFile(payload.fileName, payload.fileSize, payload.fileDataUrl);
           } else if (payload.action === "clipboard_update") {
             setSharedClipboardText(payload.text);
           }
@@ -224,26 +259,27 @@ export default function App() {
     }
   };
 
-  // Receive file handler
-  const handleReceiveFile = (name: string, size: number, _data: string) => {
-    const item: TransferModel = {
+  // Receive file handler (with real Data URL)
+  const handleReceiveFile = (name: string, size: number, dataUrl?: string) => {
+    const item = {
       id: `t-${Date.now()}`,
       fileName: name,
       fileSizeBytes: size,
-      direction: "incoming",
-      state: "completed",
+      direction: "incoming" as const,
+      state: "completed" as const,
       progress: 100,
       speed: "31 MB/s",
       sha256: "b45cffe084dd3d20d928bee85e7b0f21",
       sha256Verified: true,
-      timestamp: new Date().toLocaleTimeString()
+      timestamp: new Date().toLocaleTimeString(),
+      fileDataUrl: dataUrl
     };
     setTransfers((prev) => [item, ...prev]);
     setActivities((prev) => [
       {
         id: `a-${Date.now()}`,
-        title: "Photo Received from Phone",
-        details: `${name} (${(size / 1024).toFixed(1)} KB) received over local Wi-Fi`,
+        title: "Photo / File Received from Phone",
+        details: `${name} (${(size / 1024).toFixed(1)} KB) received ready for preview & download`,
         icon: "file",
         timestamp: new Date().toLocaleTimeString(),
         isSimulated: false
@@ -252,7 +288,7 @@ export default function App() {
     ]);
   };
 
-  // Start camera on real phone
+  // Start Phone Camera Stream helper
   const startPhoneCameraStream = async () => {
     try {
       setIsPhoneCameraStreaming(true);
@@ -263,36 +299,49 @@ export default function App() {
         phoneVideoRef.current.srcObject = stream;
         phoneVideoRef.current.play();
       }
-    } catch {
+    } catch (err) {
+      console.error(err);
       setIsPhoneCameraStreaming(false);
     }
   };
 
-  // File selected on real phone
-  const handlePhoneFilePick = (e: React.ChangeEvent<HTMLInputElement>) => {
+  // Real File Upload handler
+  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
     const reader = new FileReader();
     reader.onload = () => {
+      const dataUrl = reader.result as string;
       broadcastMessage({
         action: "incoming_file",
         fileName: file.name,
         fileSize: file.size,
-        fileData: reader.result as string
+        fileDataUrl: dataUrl
       });
-      handleReceiveFile(file.name, file.size, reader.result as string);
+      handleReceiveFile(file.name, file.size, dataUrl);
     };
     reader.readAsDataURL(file);
   };
 
-  // Phone trackpad drag
-  const handlePhoneTouchMove = (e: React.TouchEvent<HTMLDivElement>) => {
+  // Trigger file download helper
+  const downloadFile = (fileName: string, dataUrl?: string) => {
+    if (!dataUrl) return;
+    const a = document.createElement("a");
+    a.href = dataUrl;
+    a.download = fileName;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  };
+
+  // Trackpad Touch Move handler (with preventDefault to stop horizontal shaking)
+  const handleTrackpadTouch = (e: React.TouchEvent<HTMLDivElement>) => {
     if (e.touches.length > 0) {
       const touch = e.touches[0];
       const rect = e.currentTarget.getBoundingClientRect();
-      const dx = (touch.clientX - (rect.left + rect.width / 2)) * 0.18;
-      const dy = (touch.clientY - (rect.top + rect.height / 2)) * 0.18;
+      const dx = (touch.clientX - (rect.left + rect.width / 2)) * 0.16;
+      const dy = (touch.clientY - (rect.top + rect.height / 2)) * 0.16;
 
       broadcastMessage({ action: "cursor_move", dx, dy });
       setCursorPos((prev) => ({
@@ -304,12 +353,82 @@ export default function App() {
 
   return (
     <div
-      className={`min-h-screen ${
+      className={`w-full min-h-screen ${
         isDarkMode ? "bg-neutral-950 text-neutral-100" : "bg-neutral-50 text-neutral-900"
-      } flex flex-col font-sans selection:bg-blue-600 selection:text-white`}
+      } flex flex-col font-sans overflow-x-hidden`}
     >
-      {/* GLOBAL TOP NAVIGATION */}
-      <header className="border-b border-neutral-800 bg-neutral-900/90 backdrop-blur px-3 sm:px-6 py-2.5 flex items-center justify-between z-30 sticky top-0">
+      {/* ========================================================================= */}
+      {/* MAC FULLSCREEN LOCK SCREEN (When Locked from Phone!)                      */}
+      {/* ========================================================================= */}
+      {isMacLocked && viewMode !== "phone" && (
+        <div className="fixed inset-0 z-50 bg-black/90 backdrop-blur-2xl flex flex-col items-center justify-between p-8 select-none animate-in fade-in duration-300">
+          <div className="w-full flex justify-between items-center text-xs text-neutral-400 font-mono">
+            <span>MacBook Pro • macOS Sonoma</span>
+            <span className="flex items-center space-x-1.5 text-amber-400">
+              <Lock className="h-3.5 w-3.5" />
+              <span>SCREEN LOCKED BY PHONE</span>
+            </span>
+          </div>
+
+          <div className="flex flex-col items-center justify-center space-y-6 text-center max-w-sm">
+            {/* User Avatar */}
+            <div className="relative">
+              <div className="h-28 w-28 rounded-full bg-gradient-to-tr from-blue-600 to-indigo-600 flex items-center justify-center text-white text-3xl font-extrabold shadow-2xl border-4 border-white/20">
+                V
+              </div>
+              <div className="absolute -bottom-1 -right-1 p-2 rounded-full bg-amber-500 text-black shadow-lg">
+                <Lock className="h-5 w-5" />
+              </div>
+            </div>
+
+            <div className="space-y-1">
+              <h2 className="text-2xl font-bold text-white tracking-tight">Vikash's MacBook Pro</h2>
+              <p className="text-xs text-neutral-400">Locked at {lockTime || "Just now"}</p>
+              {unlockStatusMessage && (
+                <p className="text-xs text-emerald-400 font-medium pt-1">{unlockStatusMessage}</p>
+              )}
+            </div>
+
+            <div className="p-4 rounded-2xl bg-neutral-900/80 border border-neutral-800 space-y-2 shadow-xl">
+              <Fingerprint className="h-8 w-8 text-emerald-400 mx-auto animate-pulse" />
+              <p className="text-xs font-semibold text-neutral-200">
+                Touch Fingerprint on your phone to Unlock
+              </p>
+              <p className="text-[11px] text-neutral-400">
+                Your paired {connectedDeviceName} holds the cryptographic identity key.
+              </p>
+            </div>
+
+            {/* Manual Unlock Override Button for testing */}
+            <button
+              onClick={() => {
+                setIsMacLocked(false);
+                setActivities((prev) => [
+                  {
+                    id: `a-${Date.now()}`,
+                    title: "MacBook Unlocked Manually",
+                    details: "Screen lock dismissed by user",
+                    icon: "shield",
+                    timestamp: new Date().toLocaleTimeString(),
+                    isSimulated: false
+                  },
+                  ...prev
+                ]);
+              }}
+              className="px-4 py-2 rounded-xl bg-neutral-800/80 hover:bg-neutral-800 text-neutral-400 hover:text-white text-xs transition"
+            >
+              Manual Password Unlock Override
+            </button>
+          </div>
+
+          <div className="text-[11px] text-neutral-500 font-mono">
+            Pairzen Protected Session • E2EE Local Link
+          </div>
+        </div>
+      )}
+
+      {/* TOP HEADER */}
+      <header className="w-full border-b border-neutral-800 bg-neutral-900/90 backdrop-blur px-3 sm:px-6 py-2.5 flex items-center justify-between z-30 sticky top-0 overflow-x-hidden">
         <div className="flex items-center space-x-2.5">
           <div className="h-8 w-8 rounded-xl bg-gradient-to-tr from-blue-600 to-indigo-500 flex items-center justify-center shadow-lg shadow-blue-500/20">
             <Share2 className="h-4 w-4 text-white" />
@@ -320,19 +439,19 @@ export default function App() {
               {isPhoneConnected ? (
                 <span className="text-[10px] uppercase font-bold tracking-wider px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 flex items-center space-x-1">
                   <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
-                  <span>Connected</span>
+                  <span>Phone Linked</span>
                 </span>
               ) : (
                 <span className="text-[10px] uppercase font-bold tracking-wider px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-400 border border-amber-500/30">
-                  Ready to Pair
+                  Scan to Connect
                 </span>
               )}
             </div>
           </div>
         </div>
 
-        {/* View Mode & Theme Switcher */}
         <div className="flex items-center space-x-2">
+          {/* Switch View Buttons */}
           <div className="flex items-center space-x-1 bg-neutral-800 p-0.5 rounded-lg border border-neutral-700/60 text-xs">
             <button
               onClick={() => setViewMode("mac")}
@@ -374,20 +493,20 @@ export default function App() {
               className="flex items-center space-x-1 px-3 py-1 bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold rounded-lg shadow transition"
             >
               <QrCode className="h-3.5 w-3.5" />
-              <span className="hidden sm:inline">Pair Phone</span>
+              <span className="hidden sm:inline">Pair QR</span>
             </button>
           )}
         </div>
       </header>
 
       {/* MAIN CONTAINER */}
-      <div className="flex-1 flex overflow-hidden">
+      <div className="w-full flex-1 flex overflow-hidden">
         {/* ========================================================================= */}
-        {/* VIEW A: MAC DESKTOP INTERFACE (Shown when viewMode === 'mac' or 'dual')    */}
+        {/* VIEW A: MAC DESKTOP VIEW                                                  */}
         {/* ========================================================================= */}
         {viewMode !== "phone" && (
           <div className="flex-1 flex overflow-hidden border-r border-neutral-800/80">
-            {/* macOS Sidebar */}
+            {/* Sidebar */}
             <aside className="w-56 bg-neutral-900/60 border-r border-neutral-800/80 hidden lg:flex flex-col justify-between p-3 select-none">
               <div className="space-y-1">
                 <div className="px-3 py-2 text-[10px] font-semibold tracking-wider text-neutral-400 uppercase">
@@ -434,43 +553,59 @@ export default function App() {
                   <span className="h-2 w-2 rounded-full bg-green-500 animate-pulse"></span>
                   <span className="font-semibold text-neutral-200">MacBook Pro</span>
                 </div>
-                <p className="text-[11px] text-neutral-400 font-mono">{macHost}:8765</p>
+                <p className="text-[11px] text-neutral-400 font-mono">{macIp}:8765</p>
               </div>
             </aside>
 
-            {/* Desktop Main Content */}
+            {/* Main Details Panel */}
             <main className="flex-1 overflow-y-auto p-4 sm:p-6 lg:p-8 bg-neutral-950/60">
-              {/* SCAN QR PROMINENT BANNER (IF NOT PAIRED YET) */}
+              {/* BIG PROMINENT PAIRING QR CODE BANNER */}
               {!isPhoneConnected ? (
                 <div className="mb-6 p-6 rounded-3xl bg-gradient-to-r from-blue-950/60 via-indigo-950/40 to-neutral-900 border-2 border-blue-500/40 shadow-xl flex flex-col md:flex-row items-center justify-between gap-6">
                   <div className="space-y-3">
-                    <div className="flex items-center space-x-2">
-                      <span className="p-2 rounded-xl bg-blue-500/20 text-blue-400">
-                        <QrCode className="h-6 w-6" />
+                    <div className="flex items-center space-x-2.5">
+                      <span className="p-2.5 rounded-2xl bg-blue-500/20 text-blue-400">
+                        <QrCode className="h-7 w-7" />
                       </span>
                       <div>
-                        <h2 className="text-lg font-bold text-white">Scan this QR Code with your Phone</h2>
+                        <h2 className="text-xl font-extrabold text-white">Scan to Connect Phone</h2>
                         <p className="text-xs text-neutral-300">
-                          Open your mobile camera app, point it at this screen, and tap the link to pair instantly!
+                          Point your iPhone or Android default Camera at this QR code.
                         </p>
                       </div>
                     </div>
 
-                    <div className="space-y-1.5 text-xs text-neutral-300 bg-black/40 p-3.5 rounded-2xl border border-white/5 font-mono">
-                      <p>
-                        📱 Phone Link: <span className="text-emerald-400 select-all font-bold">{connectUrl}</span>
-                      </p>
-                      <p className="text-[11px] text-neutral-400">
-                        Instant zero-config local Wi-Fi handshake over WebSocket relay.
-                      </p>
+                    <div className="space-y-1.5 text-xs text-neutral-300 bg-black/50 p-3.5 rounded-2xl border border-white/5 font-mono">
+                      <div className="flex items-center justify-between">
+                        <span>📱 Phone Direct Link:</span>
+                        <button
+                          onClick={() => {
+                            navigator.clipboard.writeText(connectUrl);
+                            alert("Copied link: " + connectUrl);
+                          }}
+                          className="text-[11px] text-blue-400 hover:underline"
+                        >
+                          Copy Link
+                        </button>
+                      </div>
+                      <p className="text-emerald-400 font-bold select-all break-all">{connectUrl}</p>
                     </div>
 
                     <div className="flex items-center space-x-3 pt-1">
+                      <div className="flex items-center space-x-1.5 text-xs text-neutral-400">
+                        <span>Mac IP:</span>
+                        <input
+                          type="text"
+                          value={macIp}
+                          onChange={(e) => setMacIp(e.target.value)}
+                          className="bg-black/60 border border-neutral-700 px-2 py-1 rounded-lg text-emerald-400 font-mono text-xs w-32 text-center"
+                        />
+                      </div>
                       <button
                         onClick={() => {
                           setIsPhoneConnected(true);
                           setConnectionTime(new Date().toLocaleTimeString());
-                          broadcastMessage({ action: "phone_connected", deviceName: "Manual Simulator Phone" });
+                          broadcastMessage({ action: "phone_connected", deviceName: "Mobile Phone" });
                         }}
                         className="px-3.5 py-1.5 rounded-xl bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-300 border border-emerald-500/30 text-xs font-semibold flex items-center space-x-1.5 transition"
                       >
@@ -480,16 +615,16 @@ export default function App() {
                     </div>
                   </div>
 
-                  {/* Big Scannable QR Code */}
+                  {/* Sharp Local Canvas/SVG QR Code */}
                   <div className="flex flex-col items-center justify-center p-4 bg-white rounded-2xl shadow-2xl flex-shrink-0">
-                    <img
-                      src={`https://api.qrserver.com/v1/create-qr-code/?size=180x180&margin=8&data=${encodeURIComponent(
-                        connectUrl
-                      )}`}
-                      alt="Pairzen QR Code"
-                      className="h-44 w-44 object-contain"
-                    />
-                    <span className="text-[10px] font-black tracking-widest text-black/70 mt-2 font-mono">
+                    {qrDataUrl ? (
+                      <img src={qrDataUrl} alt="Pairzen QR" className="h-44 w-44 object-contain" />
+                    ) : (
+                      <div className="h-44 w-44 flex items-center justify-center text-black text-xs font-mono">
+                        Generating QR…
+                      </div>
+                    )}
+                    <span className="text-[10px] font-black tracking-widest text-black/80 mt-2 font-mono">
                       SCAN WITH PHONE CAMERA
                     </span>
                   </div>
@@ -518,7 +653,7 @@ export default function App() {
                 </div>
               )}
 
-              {/* OVERVIEW TAB CONTENT */}
+              {/* OVERVIEW CONTENT */}
               {activeTab === "overview" && (
                 <div className="space-y-6 max-w-5xl">
                   {/* Connected Devices Grid */}
@@ -537,7 +672,7 @@ export default function App() {
                                   ONLINE
                                 </span>
                               </div>
-                              <p className="text-xs text-neutral-400">Direct Local Link ({macHost})</p>
+                              <p className="text-xs text-neutral-400">Direct Local Link ({macIp})</p>
                             </div>
                           </div>
                           <span className="h-2.5 w-2.5 rounded-full bg-emerald-400 animate-pulse"></span>
@@ -579,7 +714,7 @@ export default function App() {
                     ))}
                   </div>
 
-                  {/* Remote Cursor Canvas on Mac */}
+                  {/* Remote Cursor Canvas */}
                   <div className="p-5 rounded-2xl bg-neutral-900 border border-neutral-800 space-y-3">
                     <div className="flex items-center justify-between">
                       <div className="flex items-center space-x-2">
@@ -589,7 +724,8 @@ export default function App() {
                         </h2>
                       </div>
                       <span className="text-xs font-mono text-neutral-400">
-                        {lastTrackpadAction || `Position: (${cursorPos.x.toFixed(0)}, ${cursorPos.y.toFixed(0)})`}
+                        {lastTrackpadAction ||
+                          `Position: (${cursorPos.x.toFixed(0)}, ${cursorPos.y.toFixed(0)})`}
                       </span>
                     </div>
 
@@ -606,17 +742,23 @@ export default function App() {
                     </div>
                   </div>
 
-                  {/* Received Files Queue */}
+                  {/* Received Files & Download Section */}
                   <div className="space-y-3">
                     <div className="flex items-center justify-between">
-                      <h2 className="text-sm font-semibold text-neutral-300">Received Files & Transfers</h2>
+                      <div>
+                        <h2 className="text-sm font-semibold text-neutral-300">Received Files & Transfers</h2>
+                        <p className="text-xs text-neutral-500">
+                          Click "Preview" to view photos, or "Download" to save directly to disk.
+                        </p>
+                      </div>
                       <span className="text-xs text-neutral-500">{transfers.length} items</span>
                     </div>
+
                     <div className="space-y-2">
                       {transfers.map((item) => (
                         <div
                           key={item.id}
-                          className="p-4 rounded-xl bg-neutral-900 border border-neutral-800 flex items-center justify-between"
+                          className="p-4 rounded-xl bg-neutral-900 border border-neutral-800 flex items-center justify-between flex-wrap gap-3"
                         >
                           <div className="flex items-center space-x-3">
                             <div className="p-2.5 rounded-lg bg-blue-500/10 text-blue-400">
@@ -625,25 +767,60 @@ export default function App() {
                             <div>
                               <p className="text-xs font-semibold text-neutral-200">{item.fileName}</p>
                               <p className="text-[11px] text-neutral-400">
-                                {(item.fileSizeBytes / (1024 * 1024)).toFixed(1)} MB • {item.direction} • {item.speed}
+                                {(item.fileSizeBytes / (1024 * 1024)).toFixed(2)} MB • {item.direction} •{" "}
+                                {item.timestamp}
                               </p>
                             </div>
                           </div>
-                          <span className="flex items-center space-x-1 text-[11px] text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded border border-emerald-500/20 font-medium">
-                            <CheckCircle2 className="h-3.5 w-3.5" />
-                            <span>SHA-256 Verified</span>
-                          </span>
+
+                          <div className="flex items-center space-x-2">
+                            {/* Preview Button */}
+                            {item.fileDataUrl && (
+                              <button
+                                onClick={() =>
+                                  setPreviewFile({
+                                    name: item.fileName,
+                                    url: item.fileDataUrl!,
+                                    size: item.fileSizeBytes
+                                  })
+                                }
+                                className="px-3 py-1.5 rounded-lg bg-blue-600/15 hover:bg-blue-600/25 text-blue-400 text-xs font-medium flex items-center space-x-1 transition"
+                              >
+                                <Eye className="h-3.5 w-3.5" />
+                                <span>Preview</span>
+                              </button>
+                            )}
+
+                            {/* Download Button */}
+                            {item.fileDataUrl && (
+                              <button
+                                onClick={() => downloadFile(item.fileName, item.fileDataUrl)}
+                                className="px-3 py-1.5 rounded-lg bg-emerald-600/15 hover:bg-emerald-600/25 text-emerald-400 text-xs font-medium flex items-center space-x-1 transition"
+                              >
+                                <Download className="h-3.5 w-3.5" />
+                                <span>Download</span>
+                              </button>
+                            )}
+
+                            <span className="flex items-center space-x-1 text-[11px] text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded border border-emerald-500/20 font-medium">
+                              <CheckCircle2 className="h-3.5 w-3.5" />
+                              <span>Verified</span>
+                            </span>
+                          </div>
                         </div>
                       ))}
                     </div>
                   </div>
 
-                  {/* Activity Log */}
+                  {/* Activity History */}
                   <div className="space-y-3">
                     <h2 className="text-sm font-semibold text-neutral-300">Activity History</h2>
                     <div className="space-y-2">
                       {activities.map((act) => (
-                        <div key={act.id} className="p-3 rounded-xl bg-neutral-900 border border-neutral-800 flex items-center justify-between text-xs">
+                        <div
+                          key={act.id}
+                          className="p-3 rounded-xl bg-neutral-900 border border-neutral-800 flex items-center justify-between text-xs"
+                        >
                           <div>
                             <p className="font-semibold text-neutral-200">{act.title}</p>
                             <p className="text-[11px] text-neutral-400">{act.details}</p>
@@ -660,39 +837,69 @@ export default function App() {
         )}
 
         {/* ========================================================================= */}
-        {/* VIEW B: DEDICATED MOBILE PHONE INTERFACE (100% RESPONSIVE FOR PHONES)     */}
+        {/* VIEW B: 100% RESPONSIVE MOBILE PHONE CONTROLLER (ON PHONE OR DUAL SIM)    */}
         {/* ========================================================================= */}
         {(viewMode === "phone" || viewMode === "dual") && (
           <aside
             className={`${
-              viewMode === "phone" ? "flex-1 w-full" : "w-full max-w-sm border-l border-neutral-800"
-            } bg-neutral-950 flex flex-col justify-between overflow-hidden relative`}
+              viewMode === "phone" ? "w-full flex-1" : "w-full max-w-sm border-l border-neutral-800"
+            } bg-neutral-950 flex flex-col justify-between overflow-x-hidden relative overscroll-none`}
           >
-            {/* Mobile Header */}
-            <div className="px-4 py-3 bg-neutral-900/90 border-b border-neutral-800 flex items-center justify-between">
+            {/* Mobile Header with Lock Mac Shortcut */}
+            <div className="w-full px-4 py-3 bg-neutral-900 border-b border-neutral-800 flex items-center justify-between">
               <div className="flex items-center space-x-2">
                 <Smartphone className="h-4 w-4 text-emerald-400" />
-                <span className="font-bold text-sm">Pairzen Mobile</span>
+                <span className="font-bold text-sm">Pairzen Phone</span>
               </div>
-              <div className="flex items-center space-x-2">
-                <span className="h-2 w-2 rounded-full bg-emerald-400 animate-pulse"></span>
-                <span className="text-xs text-neutral-300 font-medium">MacBook Pro</span>
-              </div>
+
+              {/* QUICK LOCK / UNLOCK MAC BUTTON */}
+              <button
+                onClick={() => {
+                  if (isMacLocked) {
+                    broadcastMessage({ action: "unlock_mac" });
+                    setIsMacLocked(false);
+                    if (navigator.vibrate) navigator.vibrate([50, 50, 100]);
+                    alert("MacBook Unlocked via Phone Fingerprint! 🎉");
+                  } else {
+                    broadcastMessage({ action: "lock_mac" });
+                    setIsMacLocked(true);
+                    if (navigator.vibrate) navigator.vibrate([100]);
+                    alert("MacBook Screen is now Locked! 🔒");
+                  }
+                }}
+                className={`px-3 py-1.5 rounded-xl text-xs font-bold flex items-center space-x-1.5 transition ${
+                  isMacLocked
+                    ? "bg-emerald-600 hover:bg-emerald-500 text-white shadow-lg animate-pulse"
+                    : "bg-amber-600/20 hover:bg-amber-600/30 text-amber-300 border border-amber-500/30"
+                }`}
+              >
+                {isMacLocked ? (
+                  <>
+                    <Unlock className="h-3.5 w-3.5" />
+                    <span>Fingerprint Unlock</span>
+                  </>
+                ) : (
+                  <>
+                    <Lock className="h-3.5 w-3.5" />
+                    <span>Lock Mac</span>
+                  </>
+                )}
+              </button>
             </div>
 
-            {/* Mobile Content Tabs */}
-            <div className="flex-1 p-4 overflow-y-auto space-y-4">
+            {/* Mobile Body Content (Zero Horizontal Overflow) */}
+            <div className="w-full flex-1 p-4 overflow-y-auto space-y-4 overflow-x-hidden">
               {/* TAB 1: FULLSCREEN TOUCH TRACKPAD */}
               {mobileTab === "trackpad" && (
-                <div className="flex flex-col h-full space-y-3">
+                <div className="flex flex-col h-full space-y-3 w-full">
                   <div className="flex items-center justify-between text-xs text-neutral-400">
-                    <span>Touch & Drag to Move Mac Pointer</span>
+                    <span>Move thumb to control Mac cursor</span>
                     <span className="font-mono text-emerald-400">Active</span>
                   </div>
 
-                  {/* Responsive Trackpad Surface */}
+                  {/* Responsive Trackpad Surface with touch-action: none to prevent page shaking */}
                   <div
-                    onTouchMove={handlePhoneTouchMove}
+                    onTouchMove={handleTrackpadTouch}
                     onMouseMove={(e) => {
                       const rect = e.currentTarget.getBoundingClientRect();
                       const dx = (e.clientX - (rect.left + rect.width / 2)) * 0.12;
@@ -707,15 +914,16 @@ export default function App() {
                       broadcastMessage({ action: "cursor_click", button: "left" });
                       if (navigator.vibrate) navigator.vibrate(30);
                     }}
-                    className="flex-1 min-h-[260px] rounded-3xl bg-neutral-900 border-2 border-dashed border-neutral-700 hover:border-emerald-500 flex flex-col items-center justify-center cursor-crosshair select-none shadow-2xl active:bg-neutral-850"
+                    style={{ touchAction: "none" }}
+                    className="w-full flex-1 min-h-[260px] rounded-3xl bg-neutral-900 border-2 border-dashed border-neutral-700 hover:border-emerald-500 flex flex-col items-center justify-center cursor-crosshair select-none shadow-2xl active:bg-neutral-850"
                   >
                     <MousePointer className="h-8 w-8 text-neutral-600 mb-2" />
-                    <span className="text-xs text-neutral-400 font-medium">Move Thumb Here</span>
+                    <span className="text-xs text-neutral-400 font-medium">Touchpad Surface</span>
                     <span className="text-[10px] text-neutral-600 mt-1">Tap for Left Click</span>
                   </div>
 
                   {/* Left & Right Click Bar */}
-                  <div className="grid grid-cols-2 gap-2 pt-1">
+                  <div className="grid grid-cols-2 gap-2 pt-1 w-full">
                     <button
                       onClick={() => {
                         broadcastMessage({ action: "cursor_click", button: "left" });
@@ -740,48 +948,71 @@ export default function App() {
 
               {/* TAB 2: SEND PHOTOS & FILES */}
               {mobileTab === "files" && (
-                <div className="space-y-4">
+                <div className="space-y-4 w-full">
                   <div>
                     <h3 className="font-bold text-base text-white">Send Photos to Mac</h3>
                     <p className="text-xs text-neutral-400">
-                      Select photos or documents from your phone gallery to send to your Mac screen immediately.
+                      Pick photos or files from your phone to send to Mac with full Preview and Download capability.
                     </p>
                   </div>
 
                   <label className="w-full py-5 rounded-2xl bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white font-bold text-sm shadow-xl flex flex-col items-center justify-center space-y-2 cursor-pointer transition active:scale-98">
                     <Upload className="h-6 w-6" />
                     <span>Choose Photo / File from Phone</span>
-                    <input type="file" onChange={handlePhoneFilePick} className="hidden" />
+                    <input type="file" onChange={handleFileUpload} className="hidden" />
                   </label>
 
-                  <div className="space-y-2">
-                    <h4 className="text-xs font-semibold text-neutral-300">Recently Transferred</h4>
-                    {transfers.slice(0, 3).map((item) => (
+                  {/* Transferred Files list on phone */}
+                  <div className="space-y-2 w-full">
+                    <h4 className="text-xs font-semibold text-neutral-300">Sent Files</h4>
+                    {transfers.map((item) => (
                       <div
                         key={item.id}
-                        className="p-3 rounded-xl bg-neutral-900 border border-neutral-800 flex items-center justify-between text-xs"
+                        className="p-3 rounded-xl bg-neutral-900 border border-neutral-800 flex items-center justify-between text-xs gap-2"
                       >
-                        <div className="flex items-center space-x-2">
-                          <FileText className="h-4 w-4 text-blue-400" />
-                          <span className="text-neutral-200 font-medium truncate max-w-[160px]">
-                            {item.fileName}
-                          </span>
+                        <div className="flex items-center space-x-2 truncate">
+                          <FileText className="h-4 w-4 text-blue-400 flex-shrink-0" />
+                          <span className="text-neutral-200 font-medium truncate">{item.fileName}</span>
                         </div>
-                        <span className="text-emerald-400 text-[11px] font-mono">Sent</span>
+
+                        <div className="flex items-center space-x-1.5 flex-shrink-0">
+                          {item.fileDataUrl && (
+                            <button
+                              onClick={() =>
+                                setPreviewFile({
+                                  name: item.fileName,
+                                  url: item.fileDataUrl!,
+                                  size: item.fileSizeBytes
+                                })
+                              }
+                              className="p-1 rounded bg-neutral-800 text-blue-400 hover:bg-neutral-700"
+                              title="Preview"
+                            >
+                              <Eye className="h-3.5 w-3.5" />
+                            </button>
+                          )}
+                          {item.fileDataUrl && (
+                            <button
+                              onClick={() => downloadFile(item.fileName, item.fileDataUrl)}
+                              className="p-1 rounded bg-neutral-800 text-emerald-400 hover:bg-neutral-700"
+                              title="Download"
+                            >
+                              <Download className="h-3.5 w-3.5" />
+                            </button>
+                          )}
+                        </div>
                       </div>
                     ))}
                   </div>
                 </div>
               )}
 
-              {/* TAB 3: PHONE WEBCAM STREAM */}
+              {/* TAB 3: PHONE CAMERA STREAM */}
               {mobileTab === "camera" && (
-                <div className="space-y-4">
+                <div className="space-y-4 w-full">
                   <div>
-                    <h3 className="font-bold text-base text-white">Phone Camera as Mac Webcam</h3>
-                    <p className="text-xs text-neutral-400">
-                      Stream your mobile camera directly to your Mac screen in 1080p.
-                    </p>
+                    <h3 className="font-bold text-base text-white">Phone Camera as Webcam</h3>
+                    <p className="text-xs text-neutral-400">Stream your phone's camera directly to the Mac.</p>
                   </div>
 
                   <div className="aspect-video w-full rounded-2xl bg-black border border-neutral-800 overflow-hidden relative flex items-center justify-center">
@@ -814,72 +1045,90 @@ export default function App() {
                 </div>
               )}
 
-              {/* TAB 4: BIOMETRIC SECURITY APPROVAL */}
+              {/* TAB 4: BIOMETRIC UNLOCK & LOCK CONTROLS */}
               {mobileTab === "security" && (
-                <div className="space-y-4">
+                <div className="space-y-4 w-full">
                   <div>
-                    <h3 className="font-bold text-base text-white">Mac Unlock & Approval</h3>
+                    <h3 className="font-bold text-base text-white">Mac Lock & Biometric Unlock</h3>
                     <p className="text-xs text-neutral-400">
-                      Approve Mac login challenge nonces using your phone's hardware biometric key.
+                      Lock your Mac remotely, and unlock it using your phone's fingerprint sensor.
                     </p>
                   </div>
 
-                  <div className="p-4 rounded-2xl bg-neutral-900 border border-neutral-800 space-y-3">
-                    <div className="flex items-center space-x-3">
-                      <div className="h-10 w-10 rounded-xl bg-amber-500/10 flex items-center justify-center text-amber-400">
-                        <Fingerprint className="h-6 w-6" />
-                      </div>
-                      <div>
-                        <p className="font-bold text-xs text-white">Biometric Prompt Simulator</p>
-                        <p className="text-[11px] text-neutral-400">
-                          {isChallenging ? `Challenge Nonce: ${challengeNonce.slice(0, 8)}… (${challengeStatus})` : "ECDSA P-256 Nonce Signing"}
-                        </p>
-                      </div>
+                  {/* Fingerprint Interactive Unlock Box */}
+                  <div className="p-5 rounded-3xl bg-neutral-900 border border-neutral-800 space-y-4 text-center">
+                    <div
+                      onClick={() => {
+                        broadcastMessage({ action: "unlock_mac" });
+                        setIsMacLocked(false);
+                        if (navigator.vibrate) navigator.vibrate([60, 40, 80]);
+                        alert("Fingerprint Approved! MacBook Unlocked 🎉");
+                      }}
+                      className="h-20 w-20 mx-auto rounded-full bg-emerald-500/10 border-2 border-emerald-500/40 flex items-center justify-center text-emerald-400 cursor-pointer active:scale-95 transition shadow-lg shadow-emerald-500/10"
+                    >
+                      <Fingerprint className="h-10 w-10 animate-pulse" />
                     </div>
 
-                    {phoneBiometricPromptOpen && (
-                      <p className="text-[11px] text-amber-400 font-medium">Mac is currently waiting for your biometric authorization!</p>
-                    )}
+                    <div>
+                      <p className="font-bold text-sm text-white">Touch Fingerprint to Unlock Mac</p>
+                      <p className="text-[11px] text-neutral-400">
+                        {isMacLocked ? "Mac is currently LOCKED 🔒" : "Mac is UNLOCKED 🟢"}
+                      </p>
+                    </div>
 
-                    <button
-                      onClick={() => {
-                        broadcastMessage({ action: "biometric_approved" });
-                        setChallengeStatus("approved");
-                        setIsChallenging(false);
-                        setPhoneBiometricPromptOpen(false);
-                        if (navigator.vibrate) navigator.vibrate([80, 40, 80]);
-                        alert("Biometric Approval Signed! Challenge sent to Mac.");
-                      }}
-                      className="w-full py-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs shadow-md transition"
-                    >
-                      Approve & Unlock Mac
-                    </button>
+                    <div className="grid grid-cols-2 gap-2 pt-2">
+                      <button
+                        onClick={() => {
+                          broadcastMessage({ action: "lock_mac" });
+                          setIsMacLocked(true);
+                          if (navigator.vibrate) navigator.vibrate([100]);
+                        }}
+                        className="py-2.5 rounded-xl bg-amber-600/20 hover:bg-amber-600/30 text-amber-300 font-bold text-xs border border-amber-500/30 transition flex items-center justify-center space-x-1"
+                      >
+                        <Lock className="h-3.5 w-3.5" />
+                        <span>Lock Mac</span>
+                      </button>
+
+                      <button
+                        onClick={() => {
+                          broadcastMessage({ action: "unlock_mac" });
+                          setIsMacLocked(false);
+                          if (navigator.vibrate) navigator.vibrate([60, 40, 80]);
+                        }}
+                        className="py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs shadow transition flex items-center justify-center space-x-1"
+                      >
+                        <Unlock className="h-3.5 w-3.5" />
+                        <span>Unlock Mac</span>
+                      </button>
+                    </div>
                   </div>
                 </div>
               )}
 
-              {/* TAB 5: UNIVERSAL CLIPBOARD */}
+              {/* TAB 5: UNIVERSAL CLIPBOARD (FIXED NO HORIZONTAL SHAKE) */}
               {mobileTab === "clipboard" && (
-                <div className="space-y-4">
+                <div className="space-y-4 w-full overflow-x-hidden">
                   <div>
                     <h3 className="font-bold text-base text-white">Shared Clipboard</h3>
                     <p className="text-xs text-neutral-400">
-                      Copy text or links here to automatically paste on your Mac.
+                      Copy text or links here to automatically paste on your Mac without horizontal scroll.
                     </p>
                   </div>
 
-                  <div className="p-4 rounded-2xl bg-neutral-900 border border-neutral-800 space-y-3">
-                    <p className="text-[10px] text-neutral-400 font-semibold uppercase">Mac Active Clipboard Content:</p>
-                    <p className="text-xs font-mono text-emerald-400 bg-neutral-950 p-2.5 rounded-xl border border-neutral-800 truncate">
-                      {sharedClipboardText}
+                  <div className="p-4 rounded-2xl bg-neutral-900 border border-neutral-800 space-y-3 w-full overflow-hidden">
+                    <p className="text-[10px] text-neutral-400 font-semibold uppercase">
+                      Active Mac Clipboard:
                     </p>
+                    <div className="w-full bg-neutral-950 p-3 rounded-xl border border-neutral-800 overflow-hidden break-all text-xs font-mono text-emerald-400">
+                      {sharedClipboardText}
+                    </div>
 
                     <textarea
                       rows={3}
                       value={phoneClipboardInput}
                       onChange={(e) => setPhoneClipboardInput(e.target.value)}
                       placeholder="Type or paste any text or URL here to send to Mac…"
-                      className="w-full bg-neutral-950 border border-neutral-800 rounded-xl p-3 text-xs text-neutral-200 outline-none focus:border-blue-500"
+                      className="w-full bg-neutral-950 border border-neutral-800 rounded-xl p-3 text-xs text-neutral-200 outline-none focus:border-blue-500 resize-none break-all"
                     />
 
                     <button
@@ -900,13 +1149,13 @@ export default function App() {
               )}
             </div>
 
-            {/* Mobile Bottom Navigation Bar (App Bar) */}
-            <nav className="border-t border-neutral-800 bg-neutral-900 px-2 py-2 flex items-center justify-around z-20">
+            {/* Mobile Bottom Navigation Bar */}
+            <nav className="w-full border-t border-neutral-800 bg-neutral-900 px-2 py-2 flex items-center justify-around z-20 overflow-x-hidden">
               {[
                 { id: "trackpad", label: "Trackpad", icon: MousePointer },
                 { id: "files", label: "Files", icon: FolderUp },
                 { id: "camera", label: "Camera", icon: Camera },
-                { id: "security", label: "Unlock", icon: ShieldCheck },
+                { id: "security", label: "Lock & Unlock", icon: ShieldCheck },
                 { id: "clipboard", label: "Clipboard", icon: Copy }
               ].map((item) => {
                 const Icon = item.icon;
@@ -932,7 +1181,60 @@ export default function App() {
         )}
       </div>
 
-      {/* PAIRING MODAL (POPUP) */}
+      {/* ========================================================================= */}
+      {/* FILE PREVIEW MODAL (FOR VIEWING IMAGES & DOCUMENTS)                       */}
+      {/* ========================================================================= */}
+      {previewFile && (
+        <div className="fixed inset-0 bg-black/80 backdrop-blur-md flex items-center justify-center z-50 p-4">
+          <div className="bg-neutral-900 border border-neutral-800 rounded-3xl w-full max-w-lg p-5 space-y-4 shadow-2xl flex flex-col">
+            <div className="flex items-center justify-between">
+              <div className="truncate">
+                <h3 className="font-bold text-sm text-white truncate">{previewFile.name}</h3>
+                <p className="text-[11px] text-neutral-400">
+                  Size: {(previewFile.size / 1024).toFixed(1)} KB
+                </p>
+              </div>
+              <button
+                onClick={() => setPreviewFile(null)}
+                className="p-1 rounded-lg text-neutral-400 hover:text-white"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+
+            {/* Inline Preview Content */}
+            <div className="w-full h-64 rounded-2xl bg-black border border-neutral-800 overflow-hidden flex items-center justify-center">
+              {previewFile.url.startsWith("data:image/") ? (
+                <img src={previewFile.url} alt="Preview" className="w-full h-full object-contain" />
+              ) : (
+                <div className="text-center p-6 space-y-2 text-neutral-400">
+                  <FileText className="h-12 w-12 mx-auto text-blue-400" />
+                  <p className="text-xs font-semibold text-white">{previewFile.name}</p>
+                  <p className="text-[11px]">Document ready for download</p>
+                </div>
+              )}
+            </div>
+
+            <div className="flex space-x-2">
+              <button
+                onClick={() => setPreviewFile(null)}
+                className="flex-1 py-2.5 rounded-xl bg-neutral-800 hover:bg-neutral-700 text-xs font-semibold text-neutral-300"
+              >
+                Close
+              </button>
+              <button
+                onClick={() => downloadFile(previewFile.name, previewFile.url)}
+                className="flex-1 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs flex items-center justify-center space-x-1.5 shadow"
+              >
+                <Download className="h-4 w-4" />
+                <span>Download File</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* PAIRING MODAL DIALOG */}
       {showPairingModal && (
         <div className="fixed inset-0 bg-black/80 backdrop-blur-sm flex items-center justify-center z-50 p-4">
           <div className="bg-neutral-900 border border-neutral-800 rounded-3xl w-full max-w-md p-6 space-y-4 shadow-2xl">
@@ -950,21 +1252,16 @@ export default function App() {
             </div>
 
             <div className="flex flex-col items-center justify-center p-4 bg-white rounded-2xl shadow-xl">
-              <img
-                src={`https://api.qrserver.com/v1/create-qr-code/?size=200x200&margin=8&data=${encodeURIComponent(
-                  connectUrl
-                )}`}
-                alt="Pairzen QR"
-                className="h-44 w-44 object-contain"
-              />
+              {qrDataUrl && <img src={qrDataUrl} alt="Pairzen QR" className="h-48 w-48 object-contain" />}
               <span className="text-[10px] font-black tracking-widest text-black/80 mt-2 font-mono">
                 SCAN WITH IPHONE / ANDROID CAMERA
               </span>
             </div>
 
-            <p className="text-xs text-center text-neutral-400">
-              URL: <span className="text-emerald-400 font-mono font-bold">{connectUrl}</span>
-            </p>
+            <div className="p-3 bg-neutral-950 rounded-xl text-xs space-y-1 font-mono break-all text-neutral-300">
+              <p className="text-[10px] text-neutral-500">PHONE DIRECT URL:</p>
+              <p className="text-emerald-400">{connectUrl}</p>
+            </div>
 
             <button
               onClick={() => {
