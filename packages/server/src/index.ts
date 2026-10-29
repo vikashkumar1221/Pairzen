@@ -71,6 +71,22 @@ export function createRelayServer() {
             break;
           }
 
+          case "broadcast": {
+            // Broadcast payload to all other connected devices
+            for (const [id, session] of activeSessions.entries()) {
+              if (session.ws !== ws && session.ws.readyState === WebSocket.OPEN) {
+                session.ws.send(
+                  JSON.stringify({
+                    type: "relayed_envelope",
+                    fromDeviceId: authenticatedDeviceId || "peer",
+                    payload: message.payload
+                  })
+                );
+              }
+            }
+            break;
+          }
+
           case "relay": {
             const { toDeviceId, payload } = message;
             if (!authenticatedDeviceId) {
